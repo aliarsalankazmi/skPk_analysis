@@ -1,0 +1,906 @@
+##### Load required packages
+
+pkgs <- c("readr", "readxl", "data.table", "dplyr", "tidyr", "purrr", "ggplot2", "scales", "ggthemes", "extrafont", "Hmisc")
+allLoaded <- sapply(pkgs, require, character.only = T)
+all(allLoaded)
+
+
+
+##### Record location/paths
+
+dataFolder <- "C:\\Users\\kazami\\Desktop\\Aimia\\Campaign Analytics + BI + Self-learning\\Personal Projects\\SK-Pakistan\\Data"
+graphsFolder <- "C:\\Users\\kazami\\Desktop\\Aimia\\Campaign Analytics + BI + Self-learning\\Personal Projects\\SK-Pakistan\\graphs"
+allDataFiles <- list.files(dataFolder, full.names = T)
+reqDataFile <- allDataFiles[grepl("sk_database", allDataFiles, ignore.case = T)]
+
+
+
+##### Record functions to be used later
+
+.simpleCap <- function(x) {
+    s <- strsplit(x, " ")[[1]]
+    paste(toupper(substring(s, 1, 1)), substring(s, 2),
+          sep = "", collapse = " ")
+}
+
+
+
+##### Import and tidy data
+
+skDf <- read_excel(reqDataFile) %>%	
+		as.data.frame %>%
+		setDT
+
+
+# Removing any columns containing mostly NAs in the following steps
+
+colsNulls <- skDf[, lapply(.SD, function(x) sum(is.na(x)))] %>%		
+			melt
+colsNulls
+quantileMissing <- quantile(x = 1:nrow(skDf), probs = seq(0,1,.05))
+ninetyFivePrcntVal <- quantileMissing[length(quantileMissing) - 1]
+colsToRemove <- colsNulls[value >= ninetyFivePrcntVal, as.character(variable)]
+skDf[, (colsToRemove) := NULL]
+
+
+# Standardising province and place names here...
+
+setnames(skDf, names(skDf), tolower(names(skDf)))
+skDf[, ':='(province = tolower(province), place = tolower(place))]
+skDf[, place := trimws(place, which = "both")]
+skDf[, province := trimws(province, which = "both")]
+
+skDf[, .N, by = province]
+skDf[grepl(".*kashmir.*", province, ignore.case = T), province := "kashmir"]
+skDf[grepl(".+baltistan.*", province, ignore.case = T), province := "gilgit baltistan"]
+
+# Let's see records for unidentified provinces and use places and/or incident descriptions to identify the province
+skDf[is.na(province), ]
+skDf[is.na(province) & grepl("lahore|sargodha", place, ignore.case = T), province := "punjab"]
+skDf[is.na(province) & grepl("tank", place, ignore.case = T), province := "khyber pakhtunkhwa"]
+skDf[is.na(province) & grepl("karachi", place, ignore.case = T), province := "sindh"]
+skDf[is.na(province) & grepl("liaqat bad", incident, ignore.case = T), ':='(province = "sindh", place = "karachi")]
+skDf[is.na(province) & grepl("parachinar", place, ignore.case = T), province := "fata"]
+skDf[grepl("unknown", province, ignore.case = T),]
+skDf[grepl("unknown", province, ignore.case = T), ':='(province = "sindh", place = "karachi")]
+
+# How many unique place names do we have?
+skDf[, length(unique(place))]
+skDf[, cleanPlace := gsub("[[:punct:]]", "", place)]
+
+# Given that these are not a lot of places, we can manually inspect and standardise them. Otherwise, we could have used the `stringdist` package.
+skDf[, cleanPlace := gsub("chilas", "chillas", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("chilas", "chillas", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("gambat khairpur", "khairpur", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("hari pur abbottabad", "abbottabad", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("katcha pakka kohat", "kohat", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("kurram agency|lower kurram", "kurram", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("machch|machh|mach bolan", "mach", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("noshero feroze", "noshehro feroze", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("orakzai agency", "orakzai", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("rahimyar khan", "rahim yar khan", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("khanpur rahim yar khan", "rahim yar khan", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("qambar larkana", "qambar", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("shahdad kot|shadadkot|shahadatkot", "shahdadkot", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("sadda kurram", "sadda", cleanPlace, ignore.case = T)]
+skDf[, cleanPlace := gsub("tank", "taank", cleanPlace, ignore.case = T)]
+
+# How many different places/cities do we have for each province?
+skDf[, .(totalPlaces = length(unique(cleanPlace))), by = province][order(-totalPlaces)]
+
+skDf[, province := .simpleCap(province), by = province]
+
+# Extract month and year
+skDf[, recYr := year(date)]
+skDf[, recMnth := month(date)]
+
+
+
+####### Visualisations
+
+
+# How many killings and injuries in each province?
+summDf <- skDf[recYr >= 2012, .(`Killed` = sum(killed, na.rm = T),
+		      `Injured` = sum(injured, na.rm = T)), 
+						by = province] %>%
+		melt(id.vars = "province")
+levelToOrderBy <- skDf[recYr >= 2012, .(killed = sum(killed, na.rm = T)), by = province
+			][order(-killed)
+			][, province
+			]
+summDf[, province := factor(province, levels = levelToOrderBy, ordered = T)]
+	ggplot(data = summDf, aes(x = province, y = value)) +
+	geom_bar(stat = "identity", fill = "#F42222", width = .4) + 				#F42222, F60101
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	facet_wrap(~variable, ncol = 2) +
+	coord_flip() +
+	labs(x = "", y = "", title = "Total Shia Murders and Injuries in Pakistan's Provinces since 2012", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.4)), 
+		axis.text.x = element_text(size = rel(1.3)),
+		plot.title = element_text(size = rel(1.5), face = "bold"),
+		plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+		panel.grid.major.x = element_line(colour = "grey30", linetype = 1),
+		strip.background = element_rect(colour = "black", fill = "black"),
+		strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+		panel.spacing = unit(2.5, "lines"))
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_provComp_g1.png", sep = "/"), width = 12, height = 10)
+
+
+# Proportion of Killings and Injuries in each province
+skSumm <- skDf[recYr >= 2012, .(`Total Injured` = sum(injured, na.rm = T),
+	 	`Total Killed` = sum(killed, na.rm = T)), by = province] %>%
+		melt(id.vars = "province")
+skSumm1 <- skSumm[, totals := sum(value), by = province
+		][order(province)
+		][, prcntCasualty := value/totals, by = .(province, variable)
+		][] 
+levelToOrderBy <- skSumm1[variable == "Total Killed", 
+			][order(-prcntCasualty)
+			][, province
+			][]
+skSumm1[, province := factor(province, levels = levelToOrderBy, ordered = T)]
+	ggplot(data = skSumm1, aes(x = province, y = prcntCasualty, fill = variable)) +
+	geom_bar(stat = "identity", position = "stack", width = .4) +
+	geom_hline(yintercept = .5, colour = "white", linetype = 1, size = .4) +
+	scale_y_continuous(label = percent, breaks = pretty_breaks(n = 5)) +
+	scale_fill_manual(values = c("#F4C722", "#F42222")) +
+	labs(x = "", y = "", title = "Proportion of Shia Casualties in Pakistan's Provinces", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.4)), 
+		axis.text.x = element_text(size = rel(1.3)),
+		plot.title = element_text(size = rel(1.5), face = "bold"),
+		plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+		legend.position = "top", legend.direction = "horizontal", 
+		legend.background = element_rect(fill = "black", colour = NA),
+		legend.text = element_text(colour = "white", size = rel(1.2)),
+		legend.key = element_rect(fill = "black", colour = NA),
+		legend.title = element_blank()) +
+		coord_flip()
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_provComp_g2.png", sep = "/"), width = 12, height = 10)
+
+
+
+# Distribution of Killings
+skDf[recYr >= 2012 & !is.na(killed),
+	] %>%
+	ggplot(data = ., aes(x = province, y = killed)) +
+	geom_violin(colour = "#F42222", fill = "#F42222", na.rm = T) +
+	stat_summary(fun.y = mean, geom = "point", size = 2, colour = "white") +
+	labs(x = "", y = "", title = "Distribution of Shia Killings in Pakistan's Provinces", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.4)), 
+		axis.text.x = element_text(size = rel(1.3)),
+		plot.title = element_text(size = rel(1.5), face = "bold"),
+		plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+		panel.grid.major.x = element_line(colour = "grey30", linetype = 1)) +
+	coord_flip()
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_dist_g3.png", sep = "/"), width = 12, height = 10)
+
+
+
+summDf1 <- 
+skDf[recYr >= 2012 & !is.na(killed) & !province %in% c("Kashmir", "Islamabad"),
+	][, quartile := cut(killed, breaks = quantile(unique(killed), probs = seq(from = 0, to = 1, by = .25), na.rm = T), 
+			labels = c("Quartile: 1", "Quartile: 2", "Quartile: 3", "Quartile: 4"), include.lowest = T)]
+			#labels = c("Quantile: 0-24%", "Quantile: 25-49%", "Quantile: 50-74%", "Quantile: 75-100%"), include.lowest = T)]
+summDf1[is.na(quartile), quartile :=  "Quartile: 4"]
+
+	ggplot(data = summDf1, aes(x = province, y = killed)) +
+	geom_jitter(colour = "white", alpha = .3) +
+	geom_violin(fill = "#F42222", na.rm = T) +
+	stat_summary(fun.y = mean, geom = "point", size = 2, colour = "yellow") +
+	labs(x = "", y = "", title = "Distribution of Shia Killings in Pakistan's Provinces Split by Quartiles", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	facet_wrap(~quartile, nrow = 1, scales = "free_x")	+
+		theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.4)), 
+		axis.text.x = element_text(size = rel(1.3)),
+		plot.title = element_text(size = rel(1.5), face = "bold"),
+		plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+		panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+		strip.background = element_rect(colour = "black", fill = "black"),
+		strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold"),
+		panel.spacing = unit(3, "lines")) +
+	coord_flip()
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_dist_g4.png", sep = "/"), width = 12, height = 10)
+
+
+
+# Trend of killings in each province by month-year, with month of Muharram superimposed
+muh2012 <- data.frame(ymin = 0, ymax = 100, xmin = as.Date("2012-11-14"), xmax = as.Date("2012-12-13"))
+muh2013 <- data.frame(ymin = 0, ymax = 100, xmin = as.Date("2013-11-03"), xmax = as.Date("2013-12-04"))
+muh2014 <- data.frame(ymin = 0, ymax = 100, xmin = as.Date("2014-10-24"), xmax = as.Date("2014-11-23"))
+muh2015 <- data.frame(ymin = 0, ymax = 100, xmin = as.Date("2015-10-13"), xmax = as.Date("2015-11-13"))
+
+skDf[recYr >= 2012 & !province %in% c("Kashmir", "Islamabad"), .(totalKilled = sum(killed, na.rm = T)), by = .(date = as.Date(date), province)] %>%
+	ggplot(aes(x = date, y = totalKilled, group = province)) +
+	geom_line(colour = "white") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	labs(x = "", y = "", title = "Time Series for Shia Killings in Pakistan's Provinces", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	#facet_wrap(~province) +
+	geom_rect(data = muh2012, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "white", alpha = .2, inherit.aes = F) +
+	geom_rect(data = muh2013, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "white", alpha = .2, inherit.aes = F) +
+	geom_rect(data = muh2014, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "white", alpha = .2, inherit.aes = F) +
+	geom_rect(data = muh2015, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "white", alpha = .2, inherit.aes = F) +
+	facet_wrap(~province, scales = "free")
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_ts_g5.png", sep = "/"), width = 12, height = 10)
+
+
+
+# Difference in casualties as Muharram approaches...
+skDf_temp <- copy(skDf[recYr >= 2012 & recYr < 2015])
+skDf_temp[, diffFromMuharram := 0]
+skDf_temp[recYr == 2012, diffFromMuharram := 11 - recMnth]
+skDf_temp[recYr == 2013, diffFromMuharram := 11 - recMnth]
+skDf_temp[recYr == 2014, diffFromMuharram := 11 - recMnth]
+
+# Since some values will become negative, if Muharram was the 11th month and we have some data on casualties from 10th month, we are multiplying by 1
+# to remove the negative sign. We do not care about - here, since 1 month before or after Muharram is the same for us.
+skDf_temp[diffFromMuharram < 0, diffFromMuharram := -1 * diffFromMuharram]
+
+
+skDf_temp[, .(diffFromMuharram, province, killed, injured)
+	][!province %in% c("Kashmir", "Islamabad")
+	] %>%
+	melt(id.vars = c("diffFromMuharram", "province")) %>%
+	ggplot(data = ., aes(x = diffFromMuharram, y = value)) +
+	geom_point(colour = "white") +
+	geom_smooth(colour = "#F42222") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	scale_x_continuous(breaks = seq(from = 0, by = 2, to = 11), 
+			   labels = c("Muharram", "Rabi' AlAwal", "Jumada AlUla", "Rajab", "Ramadan", "Dhul Qa'dah")) +
+	labs(x = "", y = "", title = "Do attacks on Shias increase with the onset of the month of Muharram?", 
+		subtitle = "Chart shows attacks in form of both death and injuries | Data cover a period of Jan 2012  to Dec 2014",
+		caption = "\nData: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_blank(),
+	axis.line.y = element_blank(),
+	axis.ticks.y = element_blank(), 
+	axis.text.x = element_text(size = rel(0.9)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province) +
+	coord_polar()
+
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_cts_g6a.png", sep = "/"), width = 12, height = 10)
+
+
+
+# An alternative presentation of the above chart
+
+library(viridis); library(hrbrthemes);
+
+g1 <- 
+skDf_temp[, .(Year = as.factor(recYr), diffFromMuharram, province, killed, injured)
+	][!province %in% c("Kashmir", "Islamabad")
+	] %>%
+	melt(id.vars = c("Year", "diffFromMuharram", "province")) %>%
+	ggplot(data = ., aes(x = diffFromMuharram, y = value)) +
+	#geom_point(aes(colour = Year)) +
+	geom_smooth(aes(colour = Year, fill = Year), alpha = .1) +
+	scale_color_viridis(discrete = T, option = "viridis") +
+	scale_fill_viridis(discrete = T, option = "viridis") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	scale_x_continuous(breaks = seq(from = 0, by = 2, to = 11), 
+			   labels = c("Muharram", "Rabi' AlAwal", "Jumada AlUla", "Rajab", "Ramadan", "Dhul Qa'dah")) +
+	labs(x = "", y = "", title = "Across the years, do attacks on Shias increase with the onset of the month of Muharram?", 
+		subtitle = "Chart shows attacks in form of both death and injuries | Data cover a period of Jan 2012  to Dec 2014",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme_ipsum() +
+	theme(panel.grid = element_blank(),
+	#text = element_text(colour = "white", family = "Candara"), 
+	#axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_blank(),
+	axis.line.y = element_blank(),
+	axis.ticks.y = element_blank(), 
+	axis.text.x = element_text(size = rel(0.9)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	#plot.title = element_text(size = rel(1.5), face = "bold"),
+	#plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.text = element_text(face = "bold", hjust = 0),
+	legend.background = element_rect(fill = NULL, colour = "white"),
+	legend.position = "top", 
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province) +
+	coord_polar()
+
+ggsave(filename = paste(graphsFolder, "sk_mar17_cts_g6c.png", sep = "/"), width = 12, height = 10)
+
+	
+# A time series view of the circular plot above
+
+skDf_temp[, .(diffFromMuharram, province, killed, injured)
+	][!province %in% c("Kashmir", "Islamabad")
+	] %>%
+	melt(id.vars = c("diffFromMuharram", "province")) %>%
+	ggplot(data = ., aes(x = diffFromMuharram, y = value)) +
+	geom_point(colour = "white") +
+	geom_smooth(colour = "#F42222") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	scale_x_continuous(breaks = seq(from = 0, by = 2, to = 11)) + 
+	#		   labels = c("1 month from Muharram", "Muharram", "1 month from Muharram", "3 months from Muharram", "5 months from Muharram",
+	#				"7 months from Muharram", "9 months from Muharram", "2 months from Muharram")) +
+	labs(x = "Difference in Months from Muharram", y = "Casualties", title = "Do attacks on Shias increase with the onset of the month of Muharram?", 
+		subtitle = "Chart shows attacks in form of both death and injuries | Data cover a period of Jan 2012  to Dec 2014",
+		caption = "\nData: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province, scales = "free")
+
+
+
+
+library(mosaic)
+
+### Permutation Testing
+
+skDf_temp2 <- copy(skDf_temp)
+skDf_temp2[, monthCheck := ifelse(diffFromMuharram == 0, "Muharram", "Other Months")]
+
+summDf <- 
+skDf_temp2[recYr >= 2012, .(monthCheck, killed, injured, province)
+	] %>% 
+	melt(id.vars = c("monthCheck", "province"))
+
+summDf[!is.na(value)] %>%
+	ggplot(data= ., aes(x = monthCheck, y = value)) +
+	geom_boxplot() +
+	scale_y_log10()
+
+meanVal <- summDf[!is.na(value), .(mean(value)), by = monthCheck
+		][, monthCheck := factor(monthCheck, levels = c("Other Months", "Muharram"), ordered = T)
+		][order(monthCheck)
+		][, diff(V1)
+		]
+
+many_shuffles <- do(50000) *
+	(
+		summDf[!is.na(value), .(monthCheck, value)
+		][, newValue := shuffle(value)
+		][, mean(newValue), by = monthCheck
+		][, monthCheck := factor(monthCheck, levels = c("Other Months", "Muharram"), ordered = T)
+		][order(monthCheck)
+		][, diff(V1)
+		][]
+	)	
+					 
+ggplot(data = many_shuffles, aes(x = result)) + 
+	geom_histogram(colour = "grey50", fill = "white") + 
+	labs(x = "", y = "", title = "") +
+	scale_y_continuous(label = comma) +
+	#geom_vline(xintercept = -meanVal, color = "red") + 	#not interested in two way test
+	geom_vline(xintercept = meanVal, colour = "red") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines"))
+
+
+many_shuffles %>%
+    filter((result >= meanVal)) %>%
+    nrow() / nrow(many_shuffles)
+
+
+
+### Bootstrapped Confidence Intervals
+
+more_shuffles <- do(10000) *
+	(
+		summDf[!is.na(value) & !province %in% c("Kashmir", "Islamabad")] %>%
+		resample(replace = T, groups = "province") %>%
+		group_by(province) %>%
+		summarise(meanVal = mean(value))
+	)
+
+ggplot(data = more_shuffles, aes(x = meanVal)) + 
+	geom_histogram(colour = "grey50", fill = "white") + 
+	labs(x = "", y = "", title = "") +
+	scale_y_continuous(label = comma) +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province, scales = "free")
+
+
+more_shuffles %>%
+	group_by(province) %>%
+	summarise(ymin = quantile(meanVal, probs = 0.025), 
+		  ymax = quantile(meanVal, probs = 0.975),
+		  ymed = median(meanVal)) %>%
+	ggplot(data = ., aes(x = reorder(province, ymed), y = ymed)) +
+	geom_point(colour = "white") +
+	geom_errorbar(aes(ymin = ymin, ymax = ymax), colour = "grey50", width = .2) +
+	labs(x = "", y = "", title = "95% Bootstrapped Confidence Intervals for Mean Number of Shia Casualties in Pakistan's Provinces",
+		subtitle = "Data cover a period of Jan 2012  to May 2015") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 10)) +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0))
+
+
+
+
+
+##################### Finishes here ###############################################################################################
+################ Following is rough script ########################################################################################
+
+
+
+summDf[!is.na(value) & province == "Sindh"] %>%
+	sample_n(40) %>%
+	group_by(monthCheck) %>%
+	summarise(mean(value)) -> a1
+
+obs_diff <- diff(a1$`mean(value)`)
+
+shuffledDf <- do(10000) * (summDf %>% 
+				filter(!is.na(value) & province == "Sindh") %>% 
+				mutate(valueTwo = shuffle(value)) %>% 
+				group_by(monthCheck) %>% 
+				summarise(meanVal = mean(valueTwo)) %>%
+				summarise(diffVal = diff(meanVal))
+			  )
+
+ggplot(data = shuffledDf, aes(x = diffVal)) + geom_histogram() + geom_vline(xintercept = -obs_diff, color = "red") + geom_vline(xintercept = obs_diff, colour = "red")
+
+
+rand_dist <- shuffledDf %>% group_by(.index) %>% summarise(diffmean = diff(mean))
+
+ggplot(data = rand_dist, aes(x = diffmean, fill = (abs(diffmean) > obs_diff))) + geom_histogram(colour = "white", bins = 20)
+
+
+
+summDf <- 
+skDf_temp2[recYr >= 2012, .(monthCheck, killed, injured, province, recYr)
+	] %>% 
+	melt(id.vars = c("monthCheck", "province", "recYr"))
+
+summDf[!is.na(value)] %>%
+	sample_n(40) %>%
+	ggplot(data= ., aes(x = monthCheck, y = value)) +
+	geom_boxplot()
+
+
+summDf[!is.na(value) & province == "Punjab"] %>%
+	sample_n(40) %>%
+	group_by(monthCheck) %>%
+	summarise(mean(value)) -> a1
+
+obs_diff <- diff(a1$`mean(value)`)
+
+library(mosaic);
+shuffledDf <- do(10000) * (summDf %>% 
+				filter(!is.na(value) & province == "Punjab") %>% 
+				mutate(valueTwo = shuffle(value)) %>% 
+				group_by(monthCheck) %>% 
+				summarise(mean = mean(valueTwo))
+			  )
+
+bootDf <- do(10000) * (summDf %>% 
+			filter(!is.na(value) & province == "Punjab" & recYr %in% c(2013, 2014)) %>% 
+			resample(replace = T, groups = recYr) %>%
+			group_by(recYr) %>%
+			summarise(meanVal = mean(value)) %>%
+			arrange(recYr) %>%
+			summarise(diffmean = diff(meanVal)))
+
+
+
+rand_dist <- shuffledDf %>% group_by(.index) %>% summarise(diffmean = diff(mean))
+
+ggplot(data = rand_dist, aes(x = diffmean, fill = (abs(diffmean) > obs_diff))) + geom_histogram(colour = "white", bins = 20)
+
+
+
+
+
+
+
+skDf_temp2 <- copy(skDf_temp)
+skDf_temp2[diffFromMuharram == 0, diffMuh := "Muharram"]
+skDf_temp2[diffFromMuharram == 1, diffMuh := "Safar"]
+skDf_temp2[diffFromMuharram == 2, diffMuh := "Rabi' AlAwal"]
+skDf_temp2[diffFromMuharram == 3, diffMuh := "Rabi' AlThani"]
+skDf_temp2[diffFromMuharram == 4, diffMuh := "Jumada AlUla"]
+skDf_temp2[diffFromMuharram == 5, diffMuh := "Jumada AlAkhir"]
+skDf_temp2[diffFromMuharram == 6, diffMuh := "Rajab"]
+skDf_temp2[diffFromMuharram == 7, diffMuh := "Sha'ban"]
+skDf_temp2[diffFromMuharram == 8, diffMuh := "Ramadan"]
+skDf_temp2[diffFromMuharram == 9, diffMuh := "Shawwal"]
+skDf_temp2[diffFromMuharram == 10, diffMuh := "Dhul Qa'dah"]
+skDf_temp2[, diffMuh := factor(diffMuh, levels = c("Muharram", "Safar", "Rabi' AlAwal", "Rabi' AlThani", "Jumada AlUla",
+						"Jumada AlAkhir", "Rajab", "Sha'ban", "Ramadan", "Shawwal", "Dhul Qa'dah"), ordered = T)]
+
+
+skDf_temp2[, .(diffMuh, province, killed, injured)
+	][!province %in% c("Kashmir", "Islamabad")
+	] %>%
+	melt(id.vars = c("diffMuh", "province")) %>%
+	ggplot(data = ., aes(x = diffMuh, y = value)) +
+	geom_point(colour = "white") +
+	geom_smooth(colour = "#F42222") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	scale_x_discrete(breaks = c("Muharram", "Rabi' AlAwal", "Jumada AlUla", "Rajab", "Ramadan", 
+			 labels = c())) +
+	labs(y = "", x = "", title = "Do attacks on Shias increase with the onset of the month of Muharram?", 
+		subtitle = "Chart shows attacks in form of both death and injuries | Data cover a period of Jan 2012  to May 2015",
+		caption = "\nData: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_blank(),
+	axis.line.y = element_blank(),  
+	axis.text.x = element_text(size = rel(.9)),
+	axis.title.x = element_text(hjust = 1),
+	axis.title.y = element_text(hjust = 1),
+	axis.ticks.x = element_line(colour = "white"),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province) +
+	coord_polar()
+
+
+
+
+# Change in Mean casualties in each province across years
+skSumm <- skDf[recYr >= 2012 & !province %in% c("Kashmir", "Islamabad"),
+		][, .(dateCas = as.Date(date), province, killed, injured)
+		] %>% melt(id.vars = c("dateCas", "province")) %>%
+		group_by(dateCas, province) %>%
+		summarise(totalCas = sum(value, na.rm = T)) %>%
+		setDT
+
+skSumm[, .(casualties = mean(totalCas, na.rm = T)), by = .(yearCas = year(dateCas), province)
+	] %>%
+	ggplot(data = ., aes(x = yearCas, y = casualties, group = province)) +
+	geom_line(colour = "white", aes(group = province)) +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	labs(x = "", y = "", title = "Average Shia Casualties Per Year in Pakistan's Provinces", 
+		subtitle = "Chart includes both death and injuries | Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.3)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold", hjust = 0),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province, scales = "free")
+
+
+
+
+
+# Perhaps identify cities with most killings...
+
+
+
+
+
+# Trend in casualties in each province by weekday (as Friday is a celebrated day, meaning there may be chances of increased attacks on Shias on that day)
+
+skSumm <- 
+skDf[recYr >= 2012 & !province %in% c("Kashmir", "Islamabad")
+	][, .(date, province, killed, injured)
+	] %>%
+	melt(id.vars = c("date", "province")) %>%
+	group_by(date, province) %>%
+	summarise(totalCas = sum(value, na.rm = T)) %>%
+	setDT
+
+skSumm[, weekDay := strftime(date, "%A")] %>%
+	ggplot(data = ., aes(x = weekDay, y = totalCas)) +
+	#geom_jitter(colour = "white", alpha = .3) +
+	geom_boxplot(fill = "#F42222", na.rm = T) +
+	#geom_jitter(colour = "white", alpha = .3) +
+	labs(x = "", y = "", title = "Distribution of Shia Killings in Pakistan's Provinces", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	facet_wrap(~province, scales = "free_x") +
+		theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.4)), 
+		axis.text.x = element_text(size = rel(1.3)),
+		plot.title = element_text(size = rel(1.5), face = "bold"),
+		plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+		panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+		strip.background = element_rect(colour = "black", fill = "black"),
+		strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold"),
+		panel.spacing = unit(3, "lines")) +
+	coord_flip()
+
+
+
+
+
+
+skDf[recYr >= 2012, .(totalKill = sum(killed, na.rm = T)), by = .(ym = format(date, "%Y-%m"), province)] %>%
+	ggplot(aes(x = ym, y = totalKill, group = province)) +
+	geom_line(colour = "white") +
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	labs(x = "", y = "", title = "Total Shia Killings in Pakistan's Provinces", 
+		subtitle = "Data cover a period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+	panel.background = element_rect(fill = "black", colour = NA),
+	panel.grid = element_blank(),
+	text = element_text(colour = "white", family = "Candara"), 
+	axis.text = element_text(colour = "white", family = "Candara"),
+	axis.text.y = element_text(size = rel(1.4)), 
+	axis.text.x = element_text(size = rel(1.3)),
+	plot.title = element_text(size = rel(1.5), face = "bold"),
+	plot.subtitle = element_text(size = rel(1.2), face = "italic"),
+	#panel.grid.major.x = element_line(colour = "grey30", linetype = 3),
+	strip.background = element_rect(colour = "black", fill = "black"),
+	strip.text = element_text(size = rel(1.3), colour = "white", family = "Candara", face = "bold"),
+	panel.spacing = unit(3, "lines")) +
+	facet_wrap(~province)
+
+
+
+
+# calculate average killing per day
+# perhaps try trend by %Y-%b
+
+
+
+# Proportion of Target and other killings...
+skDf[recYr >= 2012 & !is.na(killed),
+	][, `Type of Killing` := ifelse(killed <= 3, "Target Killing", "Other Killing")
+	][, .(kills = .N), by = .(province, `Type of Killing`)
+	][, totalKills := sum(kills), by = province
+	][order(province)
+	][, prcntKills := kills/totalKills, by = .(province, `Type of Killing`)
+	] %>%
+	ggplot(data = ., aes(x = province, y = prcntKills, fill = `Type of Killing`)) +
+	geom_bar(stat = "identity", position = "fill") +
+	scale_y_continuous(label = percent, breaks = pretty_breaks(n = 5)) +
+	scale_fill_manual(values = c("#F4C722", "#F42222")) +
+	labs(x = "", y = "", title = "Proportion of Targeted Killings in Pakistan's Provinces", 
+		subtitle = "Data cover period of Jan 2012  to May 2015",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.6)), 
+		axis.text.x = element_text(size = rel(1.2)),
+		plot.title = element_text(size = rel(1.7)),
+		plot.subtitle = element_text(size = rel(1.2)),
+		legend.position = "top", legend.direction = "horizontal", 
+		legend.background = element_rect(fill = "black", colour = NA),
+		legend.text = element_text(colour = "white", size = rel(1.2)),
+		legend.key = element_rect(fill = "black", colour = NA),
+		legend.title = element_blank())
+
+
+
+# Top 5 Cities with most casualties (Killings and Injuries) from each province...
+skSumm <- skDf[, .(province, place, killed, injured)] %>%
+	melt(id.vars = c("province", "place"))
+
+skSumm[!province %in% c("Islamabad", "Kashmir"), .(totalCasualties = sum(value, na.rm = T)), by = .(province, place)
+	][order(province, -totalCasualties)
+	][, head(.SD, 5), by = province
+	] %>%
+	ggplot(data = ., aes(x = reorder(place, totalCasualties), y = totalCasualties)) + 
+	geom_bar(stat = "identity", fill = "#F42222") + 				
+	scale_y_continuous(label = comma, breaks = pretty_breaks(n = 5)) +
+	facet_wrap(~ province, ncol = 3, scales = "free_x") +
+	labs(x = "", y = "", title = "Top 5 Deadliest Cities from Each Province ranked by Total Casualties", 
+		subtitle = "Casualties here are the sum of Murders and Injuries",
+		caption = "Data: https://lubpak.com/archives/132675") +
+	theme(plot.background = element_rect(fill = "black", colour = NA),
+		panel.background = element_rect(fill = "black", colour = NA),
+		panel.grid = element_blank(),
+		panel.spacing = unit(2, "lines"),
+		strip.background = element_rect(fill = "black", colour = NA),
+		strip.text = element_text(colour = "white", family = "Candara", size = rel(1.3)),
+		text = element_text(colour = "white", family = "Candara"), 
+		axis.text = element_text(colour = "white", family = "Candara"),
+		axis.text.y = element_text(size = rel(1.6)), 
+		axis.text.x = element_text(size = rel(1.2)),
+		plot.title = element_text(size = rel(1.7)),
+		plot.subtitle = element_text(size = rel(1.2)))
+
+
+
+
+
+
+
+
+
+
+
+# Trends in Killings...
+skDf[province == "Punjab" & recYr >= 2012
+	][, .(totalKilled = sum(killed, na.rm = T)), by = .(place, recYr)] %>%
+	ggplot(data = ., aes(x = recYr, y = totalKilled)) +
+	geom_point() +
+	geom_smooth() +
+	facet_wrap(~place, ncol = 5)
+
+
+
+
+
+
+
+
+# Using stringdist package to identify duplicates in places, as these are more than we can handle manually...
+
+require(stringdist)
+
+# Formulating a function to reshape a dist object
+reshapeDist <- function(distObject, stringMetric){
+			dt <- as.matrix(distObject) %>%
+				as.data.frame(stringsAsFactors = FALSE) %>%
+				mutate(var1 = skDf$cleanPlace)
+			names(dt) <- c(skDf$cleanPlace, "var1")
+			dt2 <- melt(dt)
+			rm(dt)
+			dt2$metric <- stringMetric
+			return(dt2)
+		}
+
+stringMetrics <- c("dl", "lcs", "lv")
+placeDiffDf <- map(stringMetrics, function(x) stringdistmatrix(a = skDf$cleanPlace, method = x)) %>%
+			map2(.x = ., .y = stringMetrics, .f = reshapeDist) %>%
+			rbindlist %>%
+			setDT
+
+setkey(placeDiffDf, var1, variable, metric)
+placeDiffFin <- unique(placeDiffDf)
+
+placeDiffDf <- stringdistmatrix(a = skDf$cleanPlace, b = skDf$cleanPlace, method = "lcs") %>% 	# also trying dl and jw
+				as.matrix %>%
+				data.frame(stringsAsFactors = F) %>%
+				setDT
+placeDiffDf[, var1 := skDf$cleanPlace]
+setnames(placeDiffDf, names(placeDiffDf), c(skDf$cleanPlace, "var1"))
+placeDiff2 <- melt(placeDiffDf)
+placeDiffFin <- placeDiff2[!is.na(var1) & !is.na(variable)]
+setkey(placeDiffFin, var1, variable)
+
+skDf[, .N, by = place][order(-N)][1:40]
+
+
+# Using approximate string distance calculation
+reshapeDist <- adist(skDf$cleanPlace, partial = T) %>%
+		as.matrix %>%
+		as.data.frame(stringsAsFactors = F) %>%
+		mutate(var1 = skDf$cleanPlace)
+names(reshapeDist) <- c(skDf$cleanPlace, "var1")
+reshapeDist1 <- melt(reshapeDist)
+
+
+
+for (j in names(skDf)) set(skDf, which(is.na(skDf[[j]])), j, 0)		# Replace NULLs with 0
+
