@@ -8,8 +8,8 @@ all(allLoaded)
 
 ##### Record location/paths
 
-dataFolder <- "C:\\Users\\kazami\\Desktop\\Aimia\\Campaign Analytics + BI + Self-learning\\Personal Projects\\SK-Pakistan\\Data"
-graphsFolder <- "C:\\Users\\kazami\\Desktop\\Aimia\\Campaign Analytics + BI + Self-learning\\Personal Projects\\SK-Pakistan\\graphs"
+dataFolder <- "C:\\Users\\kazami\\Desktop\\Personal Projects\\SK-Pakistan\\Data"
+graphsFolder <- "C:\\Users\\kazami\\Desktop\\Personal Projects\\SK-Pakistan\\graphs"
 allDataFiles <- list.files(dataFolder, full.names = T)
 reqDataFile <- allDataFiles[grepl("sk_database", allDataFiles, ignore.case = T)]
 
